@@ -1,4 +1,3 @@
-import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { createClient } from "redis";
 
@@ -8,10 +7,7 @@ publishClient.connect();
 const subscribeClient = createClient();
 subscribeClient.connect();
 
-const server = http.createServer();
-const port = 4000;
-
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ port: 8081 });
 
 const subscriptions: {
   [key: string]: {
@@ -20,28 +16,42 @@ const subscriptions: {
   };
 } = {};
 
-wss.on("connection", (connection, req) => {
-  const userId = randomId();
-  console.log(`testUser${userId} connected`);
-  subscriptions[userId] = {
-    ws: connection,
+wss.on("connection", function connection(userSocket) {
+  const id = randomId();
+  subscriptions[id] = {
+    ws: userSocket,
     rooms: [],
   };
 
-  connection.on("message", (data) => {
-    const parsedMessage = JSON.parse(data.toString());
-
+  userSocket.on("message", function message(data) {
+    const parsedMessage = JSON.parse(data as unknown as string);
     if (parsedMessage.type === "SUBSCRIBE") {
-      subscriptions[userId].rooms.push(parsedMessage.room);
+      subscriptions[id].rooms.push(parsedMessage.room);
+      if (oneUserSubscribedTo(parsedMessage.room)) {
+        console.log("subscribing on the pub sub to room " + parsedMessage.room);
+        subscribeClient.subscribe(parsedMessage.room, (message) => {
+          const parsedMessage = JSON.parse(message);
+          Object.keys(subscriptions).forEach((userId) => {
+            const { ws, rooms } = subscriptions[userId];
+            if (rooms.includes(parsedMessage.roomId)) {
+              ws.send(parsedMessage.message);
+            }
+          });
+        });
+      }
     }
 
     if (parsedMessage.type === "UNSUBSCRIBE") {
-      subscriptions[userId].rooms = subscriptions[userId].rooms.filter(
-        (x) => x !== parsedMessage.roomId
+      subscriptions[id].rooms = subscriptions[id].rooms.filter(
+        (x) => x !== parsedMessage.room
       );
+      if (lastPersonLeftRoom(parsedMessage.room)) {
+        console.log("unsubscribing from pub sub on room" + parsedMessage.room);
+        subscribeClient.unsubscribe(parsedMessage.room);
+      }
     }
 
-    if (parsedMessage === "sendMessage") {
+    if (parsedMessage.type === "sendMessage") {
       const message = parsedMessage.message;
       const roomId = parsedMessage.roomId;
 
@@ -50,17 +60,39 @@ wss.on("connection", (connection, req) => {
         JSON.stringify({
           type: "sendMessage",
           roomId: roomId,
-          message: message,
+          message,
         })
       );
     }
   });
 });
 
-function randomId() {
-  return Math.floor(Math.random() * 10);
+function oneUserSubscribedTo(roomId: string) {
+  let totalInterestedPeople = 0;
+  Object.keys(subscriptions).map((userId) => {
+    if (subscriptions[userId].rooms.includes(roomId)) {
+      totalInterestedPeople++;
+    }
+  });
+  if (totalInterestedPeople == 1) {
+    return true;
+  }
+  return false;
 }
 
-server.listen(port, () => {
-  console.log(`Server started at port ${port}`);
-});
+function lastPersonLeftRoom(roomId: string) {
+  let totalInterestedPeople = 0;
+  Object.keys(subscriptions).map((userId) => {
+    if (subscriptions[userId].rooms.includes(roomId)) {
+      totalInterestedPeople++;
+    }
+  });
+  if (totalInterestedPeople == 0) {
+    return true;
+  }
+  return false;
+}
+
+function randomId() {
+  return Math.random();
+}
